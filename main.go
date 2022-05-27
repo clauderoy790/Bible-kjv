@@ -75,10 +75,9 @@ func fetchEnhancements() {
 			}
 			fmt.Printf("Fetching: %s - Chapter %s\n", book.Book, chapter.Chapter)
 			suffix := fmt.Sprintf("%s/%s-chapter-%s", book.Book, book.Book, chapter.Chapter)
-			fullURL := strings.ToLower(path.Join(fetchFrom, suffix))
+			fullURL := strings.ToLower(fetchFrom + "/" + suffix)
 			fullURL = strings.TrimSpace(strings.ReplaceAll(fullURL, " ", "-"))
 			fmt.Println("THE URL OF REQ: ", fullURL)
-			fullURL = "https://www.kjvbibles.com"
 			resp, err := http.Get(fullURL)
 			if err != nil {
 				fmt.Printf("fail to fetch url: %s\n", fullURL)
