@@ -1,11 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
-	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
+	"github.com/chromedp/cdproto/dom"
+	"github.com/chromedp/chromedp"
 )
 
 var fetchFrom = "https://www.kjvbibles.com/blogs"
@@ -33,9 +35,9 @@ var cachePath = "./cache"
 func main() {
 	loadInitialBooks()
 	fetchBibleData()
-	makeExceptionEnhancements()
-	applyEnhancements()
-	writeEnhancedBooks()
+	// makeExceptionEnhancements()
+	// applyEnhancements()
+	// writeEnhancedBooks()
 }
 
 func getEnhancedBook(title string) *BookEnhanced {
@@ -126,6 +128,16 @@ func convertBookToEnhanced(book *Book) *BookEnhanced {
 	}
 }
 
+func countTotalToFetch() int {
+	nb := 0
+	for _, b := range initial {
+		for _, _ = range b.Chapters {
+			nb++
+		}
+	}
+	return nb
+}
+
 func fetchBibleData() {
 	fmt.Println("fetching/processing data...")
 	for _, book := range initial {
@@ -133,32 +145,43 @@ func fetchBibleData() {
 			fullURL := getFullUrl(book, chapter)
 			if _, err := os.Stat(getCacheFileName(book, chapter)); err == nil {
 				if cacheBytes, err := ioutil.ReadFile(getCacheFileName(book, chapter)); err == nil {
-					tryWriteEnhancements2(book, chapter, cacheBytes)
+					tryWriteEnhancements(book, chapter, string(cacheBytes))
 				}
 				continue
 			}
 			fmt.Printf("Fetching: %s - Chapter %s\n", book.Book, chapter.Chapter)
 
-			resp, err := http.Get(fullURL)
+			bodyStr, err := scrapeURL(fullURL)
 			if err != nil {
-				logError(fmt.Errorf("fail to fetch url: %s\n %w", fullURL, err))
-				continue
+				logError(fmt.Errorf("failed to scrape: %s, error: %w", fullURL, err))
 			}
-			if resp.StatusCode != http.StatusOK {
-				logError(fmt.Errorf("got invalid response status code: %d\n URL: %s \n %w", resp.StatusCode, fullURL, err))
-				continue
-			}
-			bodyBytes, err := ioutil.ReadAll(resp.Body)
-			resp.Body.Close()
-			if err != nil {
-				logError(fmt.Errorf("error reading body for: %s - %s\n%w", book.Book, chapter.Chapter, err))
-				continue
-			}
-			tryWriteEnhancements2(book, chapter, bodyBytes)
-			cacheData(book, chapter, bodyBytes)
-			time.Sleep(2 * time.Second)
+			tryWriteEnhancements(book, chapter, bodyStr)
+			cacheData(book, chapter, []byte(bodyStr))
+			time.Sleep(time.Second * 2)
 		}
 	}
+}
+
+func scrapeURL(url string) (res string, err error) {
+	ctx, cancel := chromedp.NewContext(context.Background())
+	defer cancel()
+
+	err = chromedp.Run(ctx,
+		chromedp.Navigate(url),
+		chromedp.WaitReady("body"),
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			node, err := dom.GetDocument().Do(ctx)
+			if err != nil {
+				return err
+			}
+			res, err = dom.GetOuterHTML().WithNodeID(node.NodeID).Do(ctx)
+			return err
+		}),
+	)
+
+	logError(fmt.Errorf("error scraping %s: %w", url, err))
+
+	return res, nil
 }
 
 func getFullUrl(book *Book, chapter *Chapter) string {
@@ -194,102 +217,14 @@ func logError(err error) {
 	}
 }
 
-func tryWriteEnhancements(book *Book, chapter *Chapter, htmlData []byte) {
-	if !(book.Book == "Genesis" && chapter.Chapter == "5") {
-		return
-	}
-	fmt.Printf("Writing enchancements for %s - %s \n\n", book.Book, chapter.Chapter)
-	document, err := goquery.NewDocumentFromReader(strings.NewReader(string(htmlData)))
-	if err != nil {
-		fmt.Println("failed to create document")
-		panic(err)
-	}
-
-	document.Find(".post").Each(func(i int, s *goquery.Selection) {
-		fmt.Println(s.Text())
-		fmt.Println("")
-		fmt.Println("")
-		fmt.Println("")
-	})
-
-	//page title
-	pageTitleElement := document.Find("title")
-	if pageTitleElement == nil {
-		panic("could not find page title")
-	}
-	pageTitle := pageTitleElement.Text()
-	pageTitle = strings.ReplaceAll(pageTitle, "– KJV Bibles", "")
-	pageTitle = strings.TrimSpace(pageTitle)
-	expectedTitle := strings.TrimSpace(fmt.Sprintf("%s Chapter %v", book.Book, chapter.Chapter))
-	if !strings.EqualFold(pageTitle, expectedTitle) {
-		fmt.Println("page title: ", pageTitle)
-		fmt.Println("expected title: ", expectedTitle)
-		errorMessage := "check Website, page title doesn't match current book/chapter: " + pageTitle + ", expecting: " + expectedTitle
-		logError(fmt.Errorf(errorMessage))
-		return
-		// panic(errorMessage)
-	}
-	strongs := document.Find("strong")
-	if strongs == nil {
-		panic("could not find strongs")
-	}
-	paragraphs := document.Find(".post p")
-	if paragraphs == nil {
-		panic(fmt.Errorf("fail to find paragraphs for %s - %v", book.Book, chapter.Chapter))
-	}
-	paragraphs.Each(func(i int, par *goquery.Selection) {
-		strong := par.Find("strong").First()
-		if strong == nil {
-			panic("unable to find strong")
-		}
-		// title
-		title := strings.TrimSpace(strong.Text())
-		title = strings.TrimSuffix(title, ".")
-
-		// text
-		text := strings.TrimSpace(par.Text())
-		text = strings.ReplaceAll(text, "\u2009", " ") // replace thin spaces by spaces
-		text = strings.TrimSpace(strings.Replace(text, title, "", 1))
-		fmt.Println("title : ", title)
-		fmt.Println("text  : ", text)
-		if title == "A New King, Who Knew Not Joseph, Arises" {
-			fmt.Println("lets see")
-		}
-		nbStr := ""
-		for _, r := range text {
-			s := string(r)
-			if _, err := strconv.Atoi(s); err != nil {
-				break
-			}
-			nbStr += s
-		}
-		nb, err := strconv.Atoi(nbStr)
-		if err != nil {
-			panic(fmt.Errorf("failed to convert verse %s to int with text: %s \n and title: %s : %w", nbStr, text, title, err))
-		}
-		chapNb, err := strconv.Atoi(chapter.Chapter)
-		if err != nil {
-			panic(fmt.Errorf("failed to convert chapter %s to int: %w \n\n with text: %s and title: %s", chapter.Chapter, err, text, title))
-		}
-		en := Enhancement{
-			book:    book.Book,
-			chapter: chapNb,
-			verse:   nb,
-			title:   title,
-		}
-		enhancements = append(enhancements, en)
-		fmt.Printf("Created new enhancements for %s - %s\n%+v\n", book.Book, chapter.Chapter, en)
-	})
-	panic("here")
-}
-
-func tryWriteEnhancements2(book *Book, chapter *Chapter, htmlData []byte) {
+func tryWriteEnhancements(book *Book, chapter *Chapter, htmlData string) {
 	display := fmt.Sprintf("%s - %s", book.Book, chapter.Chapter)
-	if !(book.Book == "Genesis" && chapter.Chapter == "5") {
-		return
-	}
+	// todo here
+	// if !(book.Book == "Genesis" && chapter.Chapter == "1") {
+	// 	return
+	// }
 	fmt.Printf("Writing enchancements for %s - %s \n\n", book.Book, chapter.Chapter)
-	document, err := goquery.NewDocumentFromReader(strings.NewReader(string(htmlData)))
+	document, err := goquery.NewDocumentFromReader(strings.NewReader(htmlData))
 	if err != nil {
 		fmt.Println("failed to create document")
 		panic(err)
@@ -300,12 +235,20 @@ func tryWriteEnhancements2(book *Book, chapter *Chapter, htmlData []byte) {
 		panic(err)
 	}
 
-	paragraphs := document.Find(".post p")
-	if paragraphs == nil {
+	parSelector := ".post p"
+	containers := document.Find(parSelector)
+	if containers == nil {
 		panic(fmt.Errorf("fail to find paragraphs for %s - %v", book.Book, chapter.Chapter))
 	}
+
+	if book.Book == "1 Chronicles" && chapter.Chapter == "1" {
+		fmt.Println("debug")
+	}
+
 	currT := ""
-	paragraphs.Each(func(i int, par *goquery.Selection) {
+	curVerse := 0
+	startVerse := -1
+	containers.Each(func(i int, par *goquery.Selection) {
 		title := ""
 		text := ""
 		if currT == "" {
@@ -316,9 +259,6 @@ func tryWriteEnhancements2(book *Book, chapter *Chapter, htmlData []byte) {
 			// title
 			title = strings.TrimSpace(strong.Text())
 			title = strings.TrimSuffix(title, ".")
-			if title == "Genealogy of the Patriarchs" {
-				fmt.Println("look")
-			}
 		} else {
 			title = currT
 		}
@@ -336,15 +276,19 @@ func tryWriteEnhancements2(book *Book, chapter *Chapter, htmlData []byte) {
 		if strings.HasPrefix(text, title) {
 			text = strings.TrimSpace(strings.Replace(text, title, "", 1))
 		}
-		fmt.Println("title : ", title)
-		fmt.Println("text  : ", text)
 
 		// get chapter text
-		curVerse := 0
 		for text != "" {
 			startText := verseStartText(curVerse + 1)
+			curVerse++
+			if startVerse == -1 {
+				startVerse = curVerse
+			}
+			if curVerse == 17 {
+				fmt.Println("look")
+			}
+
 			if strings.HasPrefix(text, startText) {
-				curVerse++
 				if i := strings.Index(text, verseStartText(curVerse+1)); i != -1 {
 					text = strings.Replace(text, startText, "", 1)
 					i = strings.Index(text, verseStartText(curVerse+1))
@@ -357,36 +301,37 @@ func tryWriteEnhancements2(book *Book, chapter *Chapter, htmlData []byte) {
 					text = strings.Replace(text, startText, "", 1)
 					actual := strings.TrimSpace(text)
 					setEnhancedVerseText(book.Book, chapter.Chapter, fmt.Sprintf("%d", curVerse), actual)
+
+					text = strings.Replace(text, actual, "", 1)
 				}
 			} else {
-				// at end of chapter
+				// at end of paragraph
 				text = strings.Replace(text, startText, "", 1)
 				actual := strings.TrimSpace(text)
 				setEnhancedVerseText(book.Book, chapter.Chapter, fmt.Sprintf("%d", curVerse), actual)
+				text = strings.Replace(text, actual, "", 1)
 			}
 		}
 
-		// todo set when to add enhancement
-		// todo also doesn't need to have all chapters in the same title, since there can be multiple
-		// title per chapter
-		chapNb , _ := strconv.Atoi(chapter.Chapter)
+		// title per verse
+		chapNb, _ := strconv.Atoi(chapter.Chapter)
 		en := Enhancement{
 			book:    book.Book,
 			chapter: chapNb,
-			verse:   curVerse,
+			verse:   startVerse,
 			title:   title,
 		}
 		enhancements = append(enhancements, en)
-		
-		// todo won't needjj
-		// verify if verse count is the same
-		if len(chapter.Verses) != curVerse {
-			panic(fmt.Errorf("chapter %s doesnt have the same amount of verse, original:%v, actual:%v", display, len(chapter.Verses), curVerse))
-		}
-		
+		startVerse = -1
+
 		fmt.Printf("Created new enhancements for %s - %s\n%+v\n", book.Book, chapter.Chapter, en)
 	})
-	panic("here")
+
+	// verify if verse count is the same
+	if len(chapter.Verses) != curVerse {
+		panic(fmt.Errorf("chapter %s doesnt have the same amount of verse, original:%v, actual:%v", display, len(chapter.Verses), curVerse))
+	}
+	// panic("LETS GOOOOO!")
 }
 
 func verseStartText(verse int) string {
