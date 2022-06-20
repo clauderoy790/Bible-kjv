@@ -326,6 +326,7 @@ func convertBookToEnhanced(book *Book) *BookEnhanced {
 			if verse.Title != "" {
 				verseEn.Title = verse.Title
 			}
+			verseEn.Subtitle = verse.Subtitle
 			versesEn = append(versesEn, verseEn)
 		}
 		chapEn.Verses = versesEn
@@ -338,24 +339,23 @@ func convertBookToEnhanced(book *Book) *BookEnhanced {
 	}
 }
 
-func countTotalToFetch() int {
-	nb := 0
-	for _, b := range initial {
-		for _, _ = range b.Chapters {
-			nb++
-		}
-	}
-	return nb
-}
-
 func fetchBibleData() {
 	fmt.Println("fetching/processing data...")
 	for _, book := range initial {
+		// // todo here
+		// if book.Book != "Psalms" {
+		// 	continue
+		// }
+
 		for _, chapter := range book.Chapters {
 			fullURL := getFullUrl(book, chapter)
 			if _, err := os.Stat(getCacheFileName(book, chapter)); err == nil {
-				if cacheBytes, err := ioutil.ReadFile(getCacheFileName(book, chapter)); err == nil {
-					tryWriteEnhancements(book, chapter, string(cacheBytes))
+				if _, err := ioutil.ReadFile(getCacheFileName(book, chapter)); err == nil {
+					// if cacheBytes, err := ioutil.ReadFile(getCacheFileName(book, chapter)); err == nil {
+					fmt.Println("no error")
+					// todo here
+
+					// tryWriteEnhancements(book, chapter, string(cacheBytes))
 				}
 				continue
 			}
@@ -365,7 +365,8 @@ func fetchBibleData() {
 			if err != nil {
 				logError(fmt.Errorf("failed to scrape: %s, error: %w", fullURL, err))
 			}
-			tryWriteEnhancements(book, chapter, bodyStr)
+			// todo here
+			// tryWriteEnhancements(book, chapter, bodyStr)
 			cacheData(book, chapter, []byte(bodyStr))
 			time.Sleep(time.Second * 2)
 		}
@@ -469,6 +470,11 @@ func tryWriteEnhancements(book *Book, chapter *Chapter, htmlData string) {
 
 			fmt.Printf("Created new exception enhancements for %s - %s\n%+v\n", book.Book, chapter.Chapter, en)
 		}
+		return
+	}
+
+	if book.Book == "Psalms" {
+		parsePsalmsChapter(book, chapter, document)
 		return
 	}
 
@@ -576,6 +582,67 @@ func tryWriteEnhancements(book *Book, chapter *Chapter, htmlData string) {
 		panic(fmt.Errorf("chapter %s doesnt have the same amount of verse, original:%v, actual:%v", display, len(chapter.Verses), curVerse))
 	}
 
+}
+
+func parsePsalmsChapter(book *Book, chapter *Chapter, doc *goquery.Document) {
+	var titles []string
+	document := doc.Clone()
+	document = document.Find(".post strong")
+	document.Each(func(i int, s *goquery.Selection) {
+		titles = append(titles, strings.TrimSpace(s.Text()))
+	})
+
+	verseTitle := ""
+	fmt.Println("what is up")
+	text := doc.Find(".post").Text()
+	text = strings.ReplaceAll(text, "\u2009", " ") // replace thin spaces by spaces
+	startInd := strings.Index(text, titles[0])
+
+	// title at top
+	if startInd != -1 {
+		verseTitle = strings.TrimSpace(titles[0])
+		createEnhancement(book, chapter, 1, verseTitle)
+	}
+	text = text[startInd+len(titles[0]):]
+	if i := strings.Index(text, "< Previous Chapter"); i != -1 {
+		text = text[:i-1]
+		text = strings.TrimSpace(text)
+	}
+
+	curVerse := 0
+	for text != "" {
+		startText := verseStartText(curVerse + 1)
+		curVerse++
+		if verseTitle = endsWithTitle(text, titles, curVerse); len(verseTitle) > 0 {
+			verseTitle = strings.TrimSpace(verseTitle)
+			createEnhancement(book, chapter, curVerse+1, verseTitle)
+			ind := strings.Index(text, verseTitle)
+			// remove title from text
+			text = text[:ind] + text[ind+len(verseTitle):]
+		}
+
+		if strings.HasPrefix(text, startText) {
+			if i := strings.Index(text, verseStartText(curVerse+1)); i != -1 {
+				text = strings.Replace(text, startText, "", 1)
+				i = strings.Index(text, verseStartText(curVerse+1))
+				actual := strings.TrimSpace(text[:i])
+				setEnhancedVerseText(book.Book, chapter.Chapter, fmt.Sprintf("%d", curVerse), actual)
+				text = strings.TrimSpace(text[i:])
+			} else {
+				// at end of verse
+				text = strings.Replace(text, startText, "", 1)
+				actual := strings.TrimSpace(text)
+				setEnhancedVerseText(book.Book, chapter.Chapter, fmt.Sprintf("%d", curVerse), actual)
+				text = strings.Replace(text, actual, "", 1)
+			}
+		} else {
+			// at end of verse
+			text = strings.Replace(text, startText, "", 1)
+			actual := strings.TrimSpace(text)
+			setEnhancedVerseText(book.Book, chapter.Chapter, fmt.Sprintf("%d", curVerse), actual)
+			text = strings.Replace(text, actual, "", 1)
+		}
+	}
 }
 
 func parseSingleChapter(book *Book, chapter *Chapter, doc *goquery.Document) {
@@ -762,10 +829,6 @@ func titleIsExpectedD(document *goquery.Document, book *Book, chapter *Chapter) 
 	return nil
 }
 
-func verifyTitle() bool {
-	return false
-}
-
 func isGenesis1(book *Book, chapter *Chapter) bool {
 	return book.Book == "Genesis" && chapter.Chapter == "1"
 }
@@ -847,9 +910,10 @@ type Chapter struct {
 }
 
 type Verse struct {
-	Title string `json:"title,omitempty"`
-	Verse string `json:"verse"`
-	Text  string `json:"text"`
+	Title    string `json:"title,omitempty"`
+	Subtitle string `json:"subtitle,omitempty"`
+	Verse    string `json:"verse"`
+	Text     string `json:"text"`
 }
 
 type BookEnhanced struct {
@@ -863,7 +927,8 @@ type ChapterEnhanced struct {
 }
 
 type VerseEnhanced struct {
-	Title string `json:"title,omitempty"`
-	Nb    int    `json:"nb"`
-	Text  string `json:"text"`
+	Subtitle string `json:"subtitle,omitempty"`
+	Title    string `json:"title,omitempty"`
+	Nb       int    `json:"nb"`
+	Text     string `json:"text"`
 }
