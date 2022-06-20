@@ -250,7 +250,7 @@ var verseTitlesExceptions = map[string]map[string]map[string]string{
 }
 var enhancements []Enhancement
 var logFile = "./logs.txt"
-var initialPath = "./json/initial"
+var initialPath = "./json/initial2"
 var enhancedPath = "./json/enhanced"
 var cachePath = "./cache"
 
